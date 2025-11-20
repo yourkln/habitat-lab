@@ -131,60 +131,35 @@ class CameraManager:
             return "Follow Cam"
         return self.camera_configs[self.current_camera_idx]['name']
 
-    def render_from_camera(self, camera_idx: int, resolution: tuple = (512, 512)) -> np.ndarray:
-        """Render from a specific camera."""
+    def apply_camera_transform(self, camera_idx: int, humanoid_pos: mn.Vector3):
+        """
+        Apply camera transform by manipulating agent's scene node directly.
+        This is simpler than changing agent state.
+        """
         if camera_idx == 0:
-            # Use the follow camera (third_rgb sensor from observations)
-            return None  # Signal to use obs['third_rgb']
+            # Follow camera - position behind humanoid
+            # This is handled automatically by third_rgb sensor
+            return
 
+        # Get the camera configuration
         cam = self.camera_configs[camera_idx]
 
-        # Calculate orientation to look at target
-        direction = (cam['look_at'] - cam['position']).normalized()
+        # Get agent scene node (this is the physical representation)
+        agent = self.sim.get_agent(0)
 
-        # Create look-at rotation using Magnum's Matrix4.look_at
-        # This creates a view matrix, we need to invert it for the camera orientation
+        # Calculate look-at transformation
         look_at_matrix = mn.Matrix4.look_at(
-            cam['position'],      # eye position
-            cam['look_at'],       # target position
+            cam['position'],      # camera position
+            cam['look_at'],       # look at target (scene center)
             mn.Vector3(0, 1, 0)   # up vector
         )
 
-        # Extract rotation from the look-at matrix
-        # The look_at matrix is a view matrix, so we need to get the rotation part
-        # and convert it to a quaternion
-        rotation_quat = mn.Quaternion.from_matrix(look_at_matrix.rotation())
+        # Invert because look_at creates a view matrix, we need model matrix
+        camera_transform = look_at_matrix.inverted()
 
-        # Get the agent (this is the habitat_sim agent, not the habitat wrapper)
-        agent = self.sim.get_agent(0)
-
-        # Save original state
-        original_state = agent.get_state()
-
-        # Create new state with camera position and orientation
-        new_state = habitat_sim.AgentState()
-        new_state.position = cam['position']
-        # Convert Magnum quaternion to [x, y, z, w] list format for habitat_sim
-        # Using the pattern from humanoid_rearrange_controller.py:571
-        new_state.rotation = list(rotation_quat.vector) + [rotation_quat.scalar]
-        new_state.sensor_states = {}  # Empty to let sensors follow agent
-
-        # Set agent to camera position
-        agent.set_state(new_state, reset_sensors=True)
-
-        # Get observation using the existing sensors
-        obs = self.sim.get_sensor_observations()
-
-        # Restore original state
-        agent.set_state(original_state, reset_sensors=True)
-
-        # Return RGB observation from available sensor
-        if 'third_rgb' in obs:
-            return obs['third_rgb']
-        elif 'rgb' in obs:
-            return obs['rgb']
-        else:
-            return None
+        # Apply transform to agent's scene node
+        # This moves where the camera sees from without affecting physics
+        agent.scene_node.transformation = camera_transform
 
 
 # ============================================================================
@@ -621,7 +596,16 @@ def main():
             humanoid_controller.apply_movement(forward_speed, rot_speed, kin_humanoid)
 
             # ================================================================
-            # STEP 3: Step physics
+            # STEP 3: Apply camera transform
+            # ================================================================
+            # Position camera before rendering
+            camera_mgr.apply_camera_transform(
+                camera_mgr.current_camera_idx,
+                kin_humanoid.base_pos
+            )
+
+            # ================================================================
+            # STEP 4: Step physics
             # ================================================================
             sim.step_physics(1.0 / 60.0)
 
@@ -641,37 +625,11 @@ def main():
             info["Camera"] = camera_mgr.get_current_camera_name()
 
             # ================================================================
-            # RENDER FROM ACTIVE CAMERA
+            # RENDER - Camera is already positioned by apply_camera_transform
             # ================================================================
-            if camera_mgr.current_camera_idx == 0:
-                # Use follow camera (third_rgb from observations)
-                draw = observations_to_image(obs, info)
-                if not args.skip_render_text:
-                    draw = overlay_frame(draw, info)
-            else:
-                # Render from fixed camera
-                camera_view = camera_mgr.render_from_camera(
-                    camera_mgr.current_camera_idx,
-                    resolution=(args.play_cam_res, args.play_cam_res)
-                )
-
-                if camera_view is not None:
-                    # Create a display with the camera view
-                    draw = camera_view
-                    if not args.skip_render_text:
-                        # Add info overlay
-                        draw = np.copy(draw)
-                        y_offset = 20
-                        for key, value in info.items():
-                            text = f"{key}: {value}"
-                            cv2.putText(draw, text, (10, y_offset),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                            y_offset += 20
-                else:
-                    # Fallback to observations
-                    draw = observations_to_image(obs, info)
-                    if not args.skip_render_text:
-                        draw = overlay_frame(draw, info)
+            draw = observations_to_image(obs, info)
+            if not args.skip_render_text:
+                draw = overlay_frame(draw, info)
 
             renderer.show(draw)
 
