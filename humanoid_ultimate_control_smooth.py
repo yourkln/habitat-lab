@@ -134,10 +134,13 @@ class FreeCamHelper:
         # Create quaternion from Euler angles
         quat = euler_to_quat(self._free_rpy)
 
+        # Convert Magnum quaternion to list [x, y, z, w] for get_observations_at
+        quat_list = list(quat.vector) + [quat.scalar]
+
         # Use the CORRECT Habitat API to get observations from arbitrary position/rotation
         obs = sim.get_observations_at(
             position=mn.Vector3(*self._free_xyz),
-            rotation=quat,
+            rotation=quat_list,  # Must be a list, not a Magnum Quaternion
             keep_agent_at_new_pose=False  # Don't move the agent
         )
 
@@ -242,10 +245,13 @@ class CameraManager:
         # Extract rotation as quaternion
         rotation_quat = mn.Quaternion.from_matrix(look_at_matrix.rotation())
 
+        # Convert to list [x, y, z, w] format required by get_observations_at
+        rotation_list = list(rotation_quat.vector) + [rotation_quat.scalar]
+
         # Use the CORRECT Habitat API to get observations from arbitrary position/rotation
         obs = self.sim.get_observations_at(
             position=cam['position'],
-            rotation=rotation_quat,
+            rotation=rotation_list,  # Must be a list, not a Magnum Quaternion
             keep_agent_at_new_pose=False  # Don't actually move the agent
         )
 
