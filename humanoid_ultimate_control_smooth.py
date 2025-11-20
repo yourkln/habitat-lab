@@ -421,6 +421,189 @@ class CvRenderer:
 
 
 # ============================================================================
+# JOINT CONTROL SYSTEM
+# ============================================================================
+
+class JointController:
+    """
+    Utility class for controlling individual joints of the humanoid.
+
+    The humanoid has 17 spherical joints, each controlled by a quaternion (4 values).
+    Joint indices (based on SMPL-X model):
+
+    Lower Body:
+      0: pelvis (controlled via base transform)
+      1-2: left_hip, right_hip
+      3: spine1
+      4-5: left_knee, right_knee
+      6: spine2
+      7-8: left_ankle, right_ankle
+      9: spine3
+      10-11: left_foot, right_foot
+
+    Upper Body:
+      12: neck
+      13-14: left_collar, right_collar
+      15: head
+      16-17: left_shoulder, right_shoulder  ← ARM CONTROL
+      18-19: left_elbow, right_elbow        ← ARM CONTROL
+      20-21: left_wrist, right_wrist
+    """
+
+    # Joint name to index mapping (first 22 joints)
+    JOINT_NAMES = {
+        "pelvis": 0,
+        "left_hip": 1,
+        "right_hip": 2,
+        "spine1": 3,
+        "left_knee": 4,
+        "right_knee": 5,
+        "spine2": 6,
+        "left_ankle": 7,
+        "right_ankle": 8,
+        "spine3": 9,
+        "left_foot": 10,
+        "right_foot": 11,
+        "neck": 12,
+        "left_collar": 13,
+        "right_collar": 14,
+        "head": 15,
+        "left_shoulder": 16,
+        "right_shoulder": 17,
+        "left_elbow": 18,
+        "right_elbow": 19,
+        "left_wrist": 20,
+        "right_wrist": 21,
+    }
+
+    def __init__(self, humanoid_controller):
+        """
+        Args:
+            humanoid_controller: The HumanoidRearrangeController instance
+        """
+        self.controller = humanoid_controller
+        self.modified_joints = None
+
+    def get_current_joints(self):
+        """Get current joint positions as a list of quaternions."""
+        pose = self.controller.get_pose()
+        joints = pose[:-32]  # Everything except the transforms
+        return list(joints)
+
+    def set_joint_rotation(self, joint_name: str, quaternion: tuple):
+        """
+        Set a specific joint's rotation.
+
+        Args:
+            joint_name: Name of the joint (e.g., "left_shoulder")
+            quaternion: Rotation as (x, y, z, w) tuple
+        """
+        if joint_name not in self.JOINT_NAMES:
+            print(f"❌ Unknown joint: {joint_name}")
+            print(f"   Available: {list(self.JOINT_NAMES.keys())}")
+            return False
+
+        joint_idx = self.JOINT_NAMES[joint_name]
+        joints = self.get_current_joints()
+
+        # Each joint uses 4 values (quaternion x, y, z, w)
+        start_idx = joint_idx * 4
+        joints[start_idx:start_idx+4] = quaternion
+
+        # Store modified joints
+        self.modified_joints = joints
+        return True
+
+    def raise_left_arm(self, angle_degrees: float = 90):
+        """Raise left arm to the side by specified angle."""
+        # Rotation around Z-axis (forward) to raise arm sideways
+        angle_rad = np.radians(angle_degrees)
+        quat = self._axis_angle_to_quat(mn.Vector3(0, 0, 1), angle_rad)
+        self.set_joint_rotation("left_shoulder", quat)
+        print(f"🙌 Raising left arm to {angle_degrees}°")
+
+    def raise_right_arm(self, angle_degrees: float = 90):
+        """Raise right arm to the side by specified angle."""
+        # Rotation around Z-axis (forward) to raise arm sideways
+        angle_rad = np.radians(angle_degrees)
+        # Right arm rotates opposite direction
+        quat = self._axis_angle_to_quat(mn.Vector3(0, 0, 1), -angle_rad)
+        self.set_joint_rotation("right_shoulder", quat)
+        print(f"🙌 Raising right arm to {angle_degrees}°")
+
+    def raise_both_arms(self, angle_degrees: float = 90):
+        """Raise both arms to the sides."""
+        self.raise_left_arm(angle_degrees)
+        self.raise_right_arm(angle_degrees)
+
+    def bend_left_elbow(self, angle_degrees: float = 90):
+        """Bend left elbow by specified angle."""
+        angle_rad = np.radians(angle_degrees)
+        quat = self._axis_angle_to_quat(mn.Vector3(1, 0, 0), angle_rad)
+        self.set_joint_rotation("left_elbow", quat)
+        print(f"💪 Bending left elbow to {angle_degrees}°")
+
+    def bend_right_elbow(self, angle_degrees: float = 90):
+        """Bend right elbow by specified angle."""
+        angle_rad = np.radians(angle_degrees)
+        quat = self._axis_angle_to_quat(mn.Vector3(1, 0, 0), -angle_rad)
+        self.set_joint_rotation("right_elbow", quat)
+        print(f"💪 Bending right elbow to {angle_degrees}°")
+
+    def wave_hand(self):
+        """Make a waving gesture with right hand."""
+        self.raise_right_arm(120)
+        self.bend_right_elbow(100)
+        print("👋 Waving!")
+
+    def arms_forward(self, angle_degrees: float = 45):
+        """Extend arms forward (like reaching)."""
+        angle_rad = np.radians(angle_degrees)
+        # Rotate shoulders forward (around X-axis)
+        quat = self._axis_angle_to_quat(mn.Vector3(1, 0, 0), angle_rad)
+        self.set_joint_rotation("left_shoulder", quat)
+        self.set_joint_rotation("right_shoulder", quat)
+        print(f"🤲 Arms forward at {angle_degrees}°")
+
+    def reset_arms(self):
+        """Reset arms to standing pose (identity quaternion)."""
+        identity = (0, 0, 0, 1)  # Identity quaternion
+        self.set_joint_rotation("left_shoulder", identity)
+        self.set_joint_rotation("right_shoulder", identity)
+        self.set_joint_rotation("left_elbow", identity)
+        self.set_joint_rotation("right_elbow", identity)
+        print("↩️  Arms reset to standing pose")
+
+    def apply_to_humanoid(self, humanoid):
+        """Apply the modified joint positions to the humanoid."""
+        if self.modified_joints is None:
+            return
+
+        pose = self.controller.get_pose()
+        transform_offset = pose[-32:-16]
+        transform_base = pose[-16:]
+
+        # Convert transforms to matrices
+        vecs_offset = [mn.Vector4(transform_offset[i*4:(i+1)*4]) for i in range(4)]
+        vecs_base = [mn.Vector4(transform_base[i*4:(i+1)*4]) for i in range(4)]
+        mat_offset = mn.Matrix4(*vecs_offset)
+        mat_base = mn.Matrix4(*vecs_base)
+
+        # Apply to humanoid
+        humanoid.set_joint_transform(
+            self.modified_joints,
+            mat_offset,
+            mat_base
+        )
+
+    @staticmethod
+    def _axis_angle_to_quat(axis: mn.Vector3, angle: float):
+        """Convert axis-angle to quaternion (x, y, z, w)."""
+        quat = mn.Quaternion.rotation(mn.Rad(angle), axis.normalized())
+        return (quat.vector.x, quat.vector.y, quat.vector.z, quat.scalar)
+
+
+# ============================================================================
 # HUMANOID CONTROLLER - SMOOTH MOTION IMPLEMENTATION
 # ============================================================================
 
@@ -708,6 +891,15 @@ def main():
     print("  +/-   : Adjust camera offset (distance from center)")
     print("  [ ]   : Adjust camera height")
     print("  V     : Save camera config to file")
+    print("\n  === JOINT CONTROL (GESTURES) ===")
+    print("  1     : Raise left arm")
+    print("  2     : Raise right arm")
+    print("  3     : Raise both arms")
+    print("  4     : Wave hand (right)")
+    print("  5     : Arms forward")
+    print("  6     : Bend left elbow")
+    print("  7     : Bend right elbow")
+    print("  0     : Reset arms to standing")
     print("\n  N : NavMesh | P : Position | M : Reset | ESC : Quit")
     print("\n" + "="*80 + "\n")
 
@@ -719,6 +911,10 @@ def main():
         try:
             kin_humanoid, humanoid_controller = configure_humanoid(sim, MOTION_DATA_PATH)
             logger.info("✅ Humanoid initialized with smooth motion")
+
+            # Initialize joint controller for arm/hand control
+            joint_ctrl = JointController(humanoid_controller)
+            logger.info("✅ Joint controller initialized (use 1-9 keys for gestures)")
         except Exception as e:
             logger.error(f"❌ Failed: {e}")
             import traceback
@@ -814,6 +1010,42 @@ def main():
             # Save camera configuration
             if key == "v":  # 'V' for save (S is taken for movement)
                 camera_mgr.save_config()
+
+            # ================================================================
+            # JOINT CONTROL - ARM AND HAND GESTURES
+            # ================================================================
+            if key == "1":  # Raise left arm
+                joint_ctrl.raise_left_arm(90)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "2":  # Raise right arm
+                joint_ctrl.raise_right_arm(90)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "3":  # Raise both arms
+                joint_ctrl.raise_both_arms(90)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "4":  # Wave hand
+                joint_ctrl.wave_hand()
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "5":  # Arms forward
+                joint_ctrl.arms_forward(45)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "6":  # Bend left elbow
+                joint_ctrl.bend_left_elbow(90)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "7":  # Bend right elbow
+                joint_ctrl.bend_right_elbow(90)
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
+            elif key == "0":  # Reset arms
+                joint_ctrl.reset_arms()
+                joint_ctrl.apply_to_humanoid(kin_humanoid)
+                sim.step_physics(1.0 / 60.0)
 
             # ================================================================
             # STEP 1: Step environment (always do this for proper observations)
