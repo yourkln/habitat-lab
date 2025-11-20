@@ -56,6 +56,94 @@ THROW_FORCE = 5.0
 
 
 # ============================================================================
+# FREE CAMERA SYSTEM (from interactive_play.py)
+# ============================================================================
+
+class FreeCamHelper:
+    """
+    Free camera movement with NO limits - fly through the scene freely.
+    Based on examples/interactive_play.py FreeCamHelper.
+    """
+    def __init__(self):
+        self._is_free_cam_mode = False
+        self._free_rpy = np.zeros(3)  # Roll, Pitch, Yaw (Euler angles)
+        self._free_xyz = np.zeros(3)  # X, Y, Z position
+
+    @property
+    def is_free_cam_mode(self):
+        return self._is_free_cam_mode
+
+    def toggle_mode(self):
+        """Toggle free camera mode on/off."""
+        self._is_free_cam_mode = not self._is_free_cam_mode
+        if self._is_free_cam_mode:
+            print("🎥 FREE CAMERA MODE - Fly anywhere!")
+            print("   W/S: Forward/Back | A/D: Left/Right | Q/E: Up/Down")
+            print("   Arrow Keys: Rotate | B: Reset camera | Z: Exit free cam")
+        else:
+            print("👤 FOLLOW CAMERA MODE - Following humanoid")
+            # Reset camera when exiting free mode
+            self._free_rpy = np.zeros(3)
+            self._free_xyz = np.zeros(3)
+
+    def update_camera(self, key: Optional[str], sim):
+        """Update free camera position and rotation."""
+        if not self._is_free_cam_mode:
+            return False
+
+        # Rotation controls (using arrow keys-like pattern)
+        offset_rpy = np.zeros(3)
+        if key == "i":  # Pitch down (look down)
+            offset_rpy[2] += 1
+        elif key == "k":  # Pitch up (look up)
+            offset_rpy[2] -= 1
+        elif key == "j":  # Yaw left (turn left)
+            offset_rpy[0] += 1
+        elif key == "l":  # Yaw right (turn right)
+            offset_rpy[0] -= 1
+        elif key == "u":  # Roll left
+            offset_rpy[1] += 1
+        elif key == "o":  # Roll right
+            offset_rpy[1] -= 1
+
+        # Translation controls
+        offset_xyz = np.zeros(3)
+        if key == "q":  # Up
+            offset_xyz[1] += 1
+        elif key == "e":  # Down
+            offset_xyz[1] -= 1
+        elif key == "w":  # Forward
+            offset_xyz[2] += 1
+        elif key == "s":  # Backward
+            offset_xyz[2] -= 1
+        elif key == "a":  # Left
+            offset_xyz[0] += 1
+        elif key == "d":  # Right
+            offset_xyz[0] -= 1
+        elif key == "b":  # Reset camera
+            self._free_rpy = np.zeros(3)
+            self._free_xyz = np.zeros(3)
+            print("🔄 Camera reset to origin")
+
+        # Apply offsets
+        offset_rpy *= 0.1
+        offset_xyz *= 0.1
+        self._free_rpy += offset_rpy
+        self._free_xyz += offset_xyz
+
+        # Create transformation matrix from Euler angles and position
+        quat = euler_to_quat(self._free_rpy)
+        trans = mn.Matrix4.from_(
+            quat.to_matrix(), mn.Vector3(*self._free_xyz)
+        )
+
+        # THE KEY: Directly manipulate the sensor node (bypasses all physics)
+        sim._sensors["third_rgb"]._sensor_object.node.transformation = trans
+
+        return True  # Camera was updated
+
+
+# ============================================================================
 # CAMERA SYSTEM
 # ============================================================================
 
@@ -469,18 +557,26 @@ def main():
     )
 
     print("\n" + "="*80)
-    print("🎮 HUMANOID MANUAL CONTROL - SMOOTH MOTION + MULTI-CAMERA")
+    print("🎮 HUMANOID CONTROL + FREE CAMERA")
     print("="*80)
     print(f"\n  Motion Speed: {LINEAR_SPEED} m/s linear, {ANGULAR_SPEED} rad/s angular")
     print(f"  Physics Rate: {CTRL_FREQ} Hz")
-    print("\n  I/K : Walk forward/backward")
+    print("\n  === HUMANOID CONTROL ===")
+    print("  I/K : Walk forward/backward")
     print("  J/L : Strafe left/right")
     print("  U/O : Rotate left/right")
-    print("\n  SPACE : Pick nearest")
+    print("\n  === OBJECT INTERACTION ===")
+    print("  SPACE : Pick nearest")
     print("  T     : Throw")
     print("  G     : Release")
-    print("\n  C : Switch camera")
-    print("  N : NavMesh | P : Position | M : Reset | ESC : Quit")
+    print("\n  === FREE CAMERA MODE ===")
+    print("  Z     : Toggle FREE CAMERA (fly anywhere!)")
+    print("    W/S : Forward/Backward (in free cam)")
+    print("    A/D : Left/Right (in free cam)")
+    print("    Q/E : Up/Down (in free cam)")
+    print("    I/K/J/L/U/O : Rotate camera (in free cam)")
+    print("    B   : Reset camera position")
+    print("\n  N : NavMesh | P : Position | M : Reset | ESC : Quit")
     print("\n" + "="*80 + "\n")
 
     with habitat.Env(config=config) as env:
@@ -515,6 +611,11 @@ def main():
         print("📷 Camera: Follow Cam (third_rgb)")
         # =========================
 
+        # ===== SETUP FREE CAMERA =====
+        free_cam = FreeCamHelper()
+        print("✅ Free camera system initialized (press Z to toggle)")
+        # =============================
+
         # Action space
         arm_action_name, base_action_name, base_key, key_map = expand_action_space(env)
         arm_dim = (
@@ -546,68 +647,91 @@ def main():
 
             if key == "p":
                 pos = kin_humanoid.base_pos
-                print(f"Pos: [{pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f}]")
+                cam_pos = free_cam._free_xyz
+                print(f"Humanoid: [{pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f}]")
+                print(f"Camera: [{cam_pos[0]:.2f}, {cam_pos[1]:.2f}, {cam_pos[2]:.2f}]")
 
-            # Camera switching
-            if key == "c":
+            # Toggle free camera mode
+            if key == "z":
+                free_cam.toggle_mode()
+
+            # Camera switching (only in follow mode)
+            if key == "c" and not free_cam.is_free_cam_mode:
                 camera_mgr.cycle_camera()
 
-            # Object interaction
-            if key == "space":
-                humanoid_controller.pick_object(sim, kin_humanoid)
-            if key == "t":
-                humanoid_controller.throw_object(sim, kin_humanoid)
-            if key == "g":
-                humanoid_controller.release_object(sim)
+            # ================================================================
+            # CHECK IF IN FREE CAMERA MODE
+            # ================================================================
+            if free_cam.is_free_cam_mode:
+                # FREE CAMERA MODE - update camera and skip humanoid control
+                camera_was_updated = free_cam.update_camera(key, sim)
 
-            # ================================================================
-            # STEP 1: Step environment
-            # ================================================================
-            base_action = [0, 0]
-            arm_action = np.zeros(arm_dim, dtype=np.float32)
-            magic_grasp = 0.0
+                if camera_was_updated:
+                    # Get fresh observations with new camera position
+                    obs = sim.get_sensor_observations()
 
-            args_dict = {key_map["arm"]: arm_action, key_map["grip"]: magic_grasp}
-            obs = step_env(env, arm_action_name, args_dict)
+                # Skip humanoid control and physics when in free camera
+                # Just render the current state
+                pass
+            else:
+                # NORMAL MODE - control humanoid
 
-            # ================================================================
-            # STEP 2: Apply humanoid movement with SMOOTH MOTION
-            # ================================================================
-            forward_speed = 0.0  # m/s
-            rot_speed = 0.0      # rad/s
+                # Object interaction
+                if key == "space":
+                    humanoid_controller.pick_object(sim, kin_humanoid)
+                if key == "t":
+                    humanoid_controller.throw_object(sim, kin_humanoid)
+                if key == "g":
+                    humanoid_controller.release_object(sim)
 
-            # Read keys - THESE CONTROL SPEED (m/s and rad/s)
-            if key == "i":
-                forward_speed = LINEAR_SPEED
-            if key == "k":
-                forward_speed = -LINEAR_SPEED
-            if key == "j":
-                forward_speed = LINEAR_SPEED * 0.5  # Strafe left
-                rot_speed = ANGULAR_SPEED * 0.5
-            if key == "l":
-                forward_speed = LINEAR_SPEED * 0.5  # Strafe right
-                rot_speed = -ANGULAR_SPEED * 0.5
-            if key == "u":
-                rot_speed = ANGULAR_SPEED
-            if key == "o":
-                rot_speed = -ANGULAR_SPEED
+                # ================================================================
+                # STEP 1: Step environment
+                # ================================================================
+                base_action = [0, 0]
+                arm_action = np.zeros(arm_dim, dtype=np.float32)
+                magic_grasp = 0.0
 
-            # Apply movement using CORRECT method with calibrated speeds
-            humanoid_controller.apply_movement(forward_speed, rot_speed, kin_humanoid)
+                args_dict = {key_map["arm"]: arm_action, key_map["grip"]: magic_grasp}
+                obs = step_env(env, arm_action_name, args_dict)
 
-            # ================================================================
-            # STEP 3: Apply camera transform
-            # ================================================================
-            # Position camera before rendering
-            camera_mgr.apply_camera_transform(
-                camera_mgr.current_camera_idx,
-                kin_humanoid.base_pos
-            )
+                # ================================================================
+                # STEP 2: Apply humanoid movement with SMOOTH MOTION
+                # ================================================================
+                forward_speed = 0.0  # m/s
+                rot_speed = 0.0      # rad/s
 
-            # ================================================================
-            # STEP 4: Step physics
-            # ================================================================
-            sim.step_physics(1.0 / 60.0)
+                # Read keys - THESE CONTROL SPEED (m/s and rad/s)
+                if key == "i":
+                    forward_speed = LINEAR_SPEED
+                if key == "k":
+                    forward_speed = -LINEAR_SPEED
+                if key == "j":
+                    forward_speed = LINEAR_SPEED * 0.5  # Strafe left
+                    rot_speed = ANGULAR_SPEED * 0.5
+                if key == "l":
+                    forward_speed = LINEAR_SPEED * 0.5  # Strafe right
+                    rot_speed = -ANGULAR_SPEED * 0.5
+                if key == "u":
+                    rot_speed = ANGULAR_SPEED
+                if key == "o":
+                    rot_speed = -ANGULAR_SPEED
+
+                # Apply movement using CORRECT method with calibrated speeds
+                humanoid_controller.apply_movement(forward_speed, rot_speed, kin_humanoid)
+
+                # ================================================================
+                # STEP 3: Apply camera transform
+                # ================================================================
+                # Position camera before rendering
+                camera_mgr.apply_camera_transform(
+                    camera_mgr.current_camera_idx,
+                    kin_humanoid.base_pos
+                )
+
+                # ================================================================
+                # STEP 4: Step physics
+                # ================================================================
+                sim.step_physics(1.0 / 60.0)
 
             # Get metrics
             info = env.get_metrics()
@@ -622,7 +746,15 @@ def main():
             info["Holding"] = "Yes" if humanoid_controller.held_object_id else "No"
             info["Frame"] = humanoid_controller.walk_mocap_frame
             info["SMOOTH"] = f"{LINEAR_SPEED}m/s"
-            info["Camera"] = camera_mgr.get_current_camera_name()
+
+            # Camera mode info
+            if free_cam.is_free_cam_mode:
+                cam_pos = free_cam._free_xyz
+                info["Mode"] = "🎥 FREE CAMERA"
+                info["Cam Pos"] = f"[{cam_pos[0]:.2f}, {cam_pos[1]:.2f}, {cam_pos[2]:.2f}]"
+            else:
+                info["Mode"] = "👤 Follow Humanoid"
+                info["Camera"] = camera_mgr.get_current_camera_name()
 
             # ================================================================
             # RENDER - Camera is already positioned by apply_camera_transform
