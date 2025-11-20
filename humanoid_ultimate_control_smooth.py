@@ -675,8 +675,9 @@ def main():
                 # FREE CAMERA MODE - update camera but skip humanoid control/physics
                 free_cam.update_camera(key, sim)
 
-                # Step environment to get observations (but don't move humanoid or do physics)
-                obs = step_env(env, arm_action_name, args_dict)
+                # Get observations directly from sim (don't step env - it would reset camera!)
+                # This is the key difference from normal mode
+                obs = sim.get_sensor_observations()
 
             else:
                 # NORMAL MODE - control humanoid
