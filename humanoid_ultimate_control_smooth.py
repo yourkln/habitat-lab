@@ -191,9 +191,9 @@ class CameraManager:
         # Calculate scene size
         scene_size = bounds_max - bounds_min
 
-        # Position cameras 60% from center towards edges (not at extreme bounds)
-        # This keeps them inside the scene with good viewing angles
-        offset_factor = 0.6
+        # Position cameras closer to center for better viewing angles
+        # 0.36 = 40% closer than previous 0.6 position
+        offset_factor = 0.36
 
         corners = [
             # Southwest
