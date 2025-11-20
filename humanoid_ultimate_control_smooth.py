@@ -139,49 +139,44 @@ class CameraManager:
 
         cam = self.camera_configs[camera_idx]
 
-        # Create render camera
-        render_camera = habitat_sim.sensors.SensorSpec()
-        render_camera.uuid = "custom_render_camera"
-        render_camera.sensor_type = habitat_sim.SensorType.COLOR
-        render_camera.resolution = resolution
-        render_camera.position = cam['position']
-
         # Calculate orientation to look at target
         direction = (cam['look_at'] - cam['position']).normalized()
 
-        # Create rotation to look in that direction
-        # This is a simplified look-at, you might need to adjust
-        up = mn.Vector3(0, 1, 0)
-        right = mn.math.cross(direction, up).normalized()
-        up = mn.math.cross(right, direction).normalized()
+        # Create look-at rotation using Magnum's Matrix4.look_at
+        # This creates a view matrix, we need to invert it for the camera orientation
+        look_at_matrix = mn.Matrix4.look_at(
+            cam['position'],      # eye position
+            cam['look_at'],       # target position
+            mn.Vector3(0, 1, 0)   # up vector
+        )
 
-        rotation_matrix = mn.Matrix4.from_(
-            right,
-            up,
-            -direction,  # OpenGL uses -Z as forward
-            mn.Vector3(0, 0, 0)
-        ).rotation()
+        # Extract rotation from the look-at matrix
+        # The look_at matrix is a view matrix, so we need to get the rotation part
+        # and convert it to a quaternion
+        rotation_quat = mn.Quaternion.from_matrix(look_at_matrix.rotation())
 
-        render_camera.orientation = mn.Quaternion.from_matrix(rotation_matrix)
-
-        # Get the agent's sensor suite and render
+        # Get the agent (this is the habitat_sim agent, not the habitat wrapper)
         agent = self.sim.get_agent(0)
 
-        # Temporarily set agent state to camera position
+        # Save original state
         original_state = agent.get_state()
 
+        # Create new state with camera position and orientation
         new_state = habitat_sim.AgentState()
         new_state.position = cam['position']
-        new_state.rotation = render_camera.orientation
-        agent.set_state(new_state)
+        new_state.rotation = rotation_quat
+        new_state.sensor_states = {}  # Empty to let sensors follow agent
 
-        # Get observation
+        # Set agent to camera position
+        agent.set_state(new_state, reset_sensors=True)
+
+        # Get observation using the existing sensors
         obs = self.sim.get_sensor_observations()
 
         # Restore original state
-        agent.set_state(original_state)
+        agent.set_state(original_state, reset_sensors=True)
 
-        # Return RGB observation
+        # Return RGB observation from available sensor
         if 'third_rgb' in obs:
             return obs['third_rgb']
         elif 'rgb' in obs:
