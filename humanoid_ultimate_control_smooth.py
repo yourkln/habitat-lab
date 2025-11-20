@@ -660,19 +660,24 @@ def main():
                 camera_mgr.cycle_camera()
 
             # ================================================================
+            # STEP 1: Step environment (always do this for proper observations)
+            # ================================================================
+            base_action = [0, 0]
+            arm_action = np.zeros(arm_dim, dtype=np.float32)
+            magic_grasp = 0.0
+
+            args_dict = {key_map["arm"]: arm_action, key_map["grip"]: magic_grasp}
+
+            # ================================================================
             # CHECK IF IN FREE CAMERA MODE
             # ================================================================
             if free_cam.is_free_cam_mode:
-                # FREE CAMERA MODE - update camera and skip humanoid control
-                camera_was_updated = free_cam.update_camera(key, sim)
+                # FREE CAMERA MODE - update camera but skip humanoid control/physics
+                free_cam.update_camera(key, sim)
 
-                if camera_was_updated:
-                    # Get fresh observations with new camera position
-                    obs = sim.get_sensor_observations()
+                # Step environment to get observations (but don't move humanoid or do physics)
+                obs = step_env(env, arm_action_name, args_dict)
 
-                # Skip humanoid control and physics when in free camera
-                # Just render the current state
-                pass
             else:
                 # NORMAL MODE - control humanoid
 
@@ -684,14 +689,7 @@ def main():
                 if key == "g":
                     humanoid_controller.release_object(sim)
 
-                # ================================================================
-                # STEP 1: Step environment
-                # ================================================================
-                base_action = [0, 0]
-                arm_action = np.zeros(arm_dim, dtype=np.float32)
-                magic_grasp = 0.0
-
-                args_dict = {key_map["arm"]: arm_action, key_map["grip"]: magic_grasp}
+                # Step environment
                 obs = step_env(env, arm_action_name, args_dict)
 
                 # ================================================================
