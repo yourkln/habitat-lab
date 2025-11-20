@@ -4,6 +4,7 @@ humanoid_ultimate_control_smooth.py
 
 PROPER manual control with SMOOTH MOTION using translate_and_rotate_with_gait
 + set_framerate_for_linspeed calibration
++ MULTI-CAMERA SUPPORT with 'C' key switching
 """
 
 import argparse
@@ -11,7 +12,7 @@ import os
 import sys
 import time
 import pickle as pkl
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import cv2
 import magnum as mn
@@ -27,6 +28,7 @@ from habitat.core.logging import logger
 from habitat.tasks.rearrange.utils import euler_to_quat
 from habitat.utils.visualizations.utils import observations_to_image, overlay_frame
 import habitat.articulated_agents.humanoids.kinematic_humanoid as kinematic_humanoid
+import habitat_sim
 
 
 # ============================================================================
@@ -34,7 +36,7 @@ import habitat.articulated_agents.humanoids.kinematic_humanoid as kinematic_huma
 # ============================================================================
 
 DEFAULT_CFG = "benchmark/rearrange/play/play.yaml"
-WINDOW_NAME = "Humanoid Manual Control - SMOOTH"
+WINDOW_NAME = "Humanoid Manual Control - SMOOTH + Multi-Cam"
 
 HUMANOID_NAME = "female_2"
 HUMANOID_URDF = f"data/humanoids/humanoid_data/{HUMANOID_NAME}/{HUMANOID_NAME}.urdf"
@@ -51,6 +53,134 @@ ANGULAR_SPEED = 3.0  # radians per second (~172 degrees/sec)
 CTRL_FREQ = 60.0     # Physics step rate (from step_physics(1.0/60.0))
 PICK_RADIUS = 3.0
 THROW_FORCE = 5.0
+
+
+# ============================================================================
+# CAMERA SYSTEM
+# ============================================================================
+
+class CameraManager:
+    """Manages multiple camera viewpoints and switching between them."""
+
+    def __init__(self, sim):
+        self.sim = sim
+        self.camera_configs = []
+        self.current_camera_idx = 0
+        self.camera_names = []
+
+    def add_camera(self, name: str, position: mn.Vector3, look_at: mn.Vector3):
+        """Add a camera with position and look-at target."""
+        self.camera_names.append(name)
+        self.camera_configs.append({
+            'name': name,
+            'position': position,
+            'look_at': look_at
+        })
+
+    def setup_corner_cameras(self, scene_bounds: tuple = None):
+        """Setup cameras at scene corners."""
+        # If we have scene bounds, use them, otherwise use defaults
+        if scene_bounds is None:
+            # Default scene bounds (will be overridden if pathfinder available)
+            bounds = mn.Range3D(mn.Vector3(-10, 0, -10), mn.Vector3(10, 5, 10))
+        else:
+            bounds = scene_bounds
+
+        center = (bounds.min + bounds.max) * 0.5
+        height = bounds.max.y * 0.8  # 80% of max height
+
+        # Calculate corner positions (elevated for better view)
+        corners = [
+            (mn.Vector3(bounds.min.x, height, bounds.min.z), "Corner 1 (SW)"),
+            (mn.Vector3(bounds.max.x, height, bounds.min.z), "Corner 2 (SE)"),
+            (mn.Vector3(bounds.max.x, height, bounds.max.z), "Corner 3 (NE)"),
+            (mn.Vector3(bounds.min.x, height, bounds.max.z), "Corner 4 (NW)"),
+        ]
+
+        # Add overhead camera
+        overhead_pos = mn.Vector3(center.x, bounds.max.y * 1.5, center.z)
+        self.add_camera("Overhead", overhead_pos, center)
+
+        # Add corner cameras looking at center
+        for pos, name in corners:
+            self.add_camera(name, pos, center)
+
+        print(f"✓ Setup {len(self.camera_configs)} fixed cameras")
+
+    def add_follow_camera(self, humanoid_pos: mn.Vector3):
+        """Add a third-person follow camera (updated each frame)."""
+        # This is handled by the existing third_rgb sensor
+        pass
+
+    def cycle_camera(self):
+        """Switch to next camera."""
+        self.current_camera_idx = (self.current_camera_idx + 1) % len(self.camera_configs)
+        cam = self.camera_configs[self.current_camera_idx]
+        print(f"📷 Camera: {cam['name']}")
+
+    def get_current_camera_name(self) -> str:
+        """Get name of current camera."""
+        if self.current_camera_idx == 0:
+            return "Follow Cam"
+        return self.camera_configs[self.current_camera_idx]['name']
+
+    def render_from_camera(self, camera_idx: int, resolution: tuple = (512, 512)) -> np.ndarray:
+        """Render from a specific camera."""
+        if camera_idx == 0:
+            # Use the follow camera (third_rgb sensor from observations)
+            return None  # Signal to use obs['third_rgb']
+
+        cam = self.camera_configs[camera_idx]
+
+        # Create render camera
+        render_camera = habitat_sim.sensors.SensorSpec()
+        render_camera.uuid = "custom_render_camera"
+        render_camera.sensor_type = habitat_sim.SensorType.COLOR
+        render_camera.resolution = resolution
+        render_camera.position = cam['position']
+
+        # Calculate orientation to look at target
+        direction = (cam['look_at'] - cam['position']).normalized()
+
+        # Create rotation to look in that direction
+        # This is a simplified look-at, you might need to adjust
+        up = mn.Vector3(0, 1, 0)
+        right = mn.math.cross(direction, up).normalized()
+        up = mn.math.cross(right, direction).normalized()
+
+        rotation_matrix = mn.Matrix4.from_(
+            right,
+            up,
+            -direction,  # OpenGL uses -Z as forward
+            mn.Vector3(0, 0, 0)
+        ).rotation()
+
+        render_camera.orientation = mn.Quaternion.from_matrix(rotation_matrix)
+
+        # Get the agent's sensor suite and render
+        agent = self.sim.get_agent(0)
+
+        # Temporarily set agent state to camera position
+        original_state = agent.get_state()
+
+        new_state = habitat_sim.AgentState()
+        new_state.position = cam['position']
+        new_state.rotation = render_camera.orientation
+        agent.set_state(new_state)
+
+        # Get observation
+        obs = self.sim.get_sensor_observations()
+
+        # Restore original state
+        agent.set_state(original_state)
+
+        # Return RGB observation
+        if 'third_rgb' in obs:
+            return obs['third_rgb']
+        elif 'rgb' in obs:
+            return obs['rgb']
+        else:
+            return None
 
 
 # ============================================================================
@@ -360,7 +490,7 @@ def main():
     )
 
     print("\n" + "="*80)
-    print("🎮 HUMANOID MANUAL CONTROL - SMOOTH MOTION ENABLED")
+    print("🎮 HUMANOID MANUAL CONTROL - SMOOTH MOTION + MULTI-CAMERA")
     print("="*80)
     print(f"\n  Motion Speed: {LINEAR_SPEED} m/s linear, {ANGULAR_SPEED} rad/s angular")
     print(f"  Physics Rate: {CTRL_FREQ} Hz")
@@ -370,7 +500,8 @@ def main():
     print("\n  SPACE : Pick nearest")
     print("  T     : Throw")
     print("  G     : Release")
-    print("\n  N : NavMesh | P : Position | M : Reset | ESC : Quit")
+    print("\n  C : Switch camera")
+    print("  N : NavMesh | P : Position | M : Reset | ESC : Quit")
     print("\n" + "="*80 + "\n")
 
     with habitat.Env(config=config) as env:
@@ -389,6 +520,21 @@ def main():
 
         if sim.pathfinder.is_loaded:
             logger.info("✅ NavMesh loaded")
+
+        # ===== SETUP CAMERAS =====
+        camera_mgr = CameraManager(sim)
+
+        # Get scene bounds from pathfinder if available
+        if sim.pathfinder.is_loaded:
+            bounds = sim.pathfinder.get_bounds()
+            print(f"Scene bounds: {bounds}")
+        else:
+            bounds = None
+
+        camera_mgr.setup_corner_cameras(bounds)
+        # Start with follow camera
+        print("📷 Camera: Follow Cam (third_rgb)")
+        # =========================
 
         # Action space
         arm_action_name, base_action_name, base_key, key_map = expand_action_space(env)
@@ -422,6 +568,10 @@ def main():
             if key == "p":
                 pos = kin_humanoid.base_pos
                 print(f"Pos: [{pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f}]")
+
+            # Camera switching
+            if key == "c":
+                camera_mgr.cycle_camera()
 
             # Object interaction
             if key == "space":
@@ -484,11 +634,40 @@ def main():
             info["Holding"] = "Yes" if humanoid_controller.held_object_id else "No"
             info["Frame"] = humanoid_controller.walk_mocap_frame
             info["SMOOTH"] = f"{LINEAR_SPEED}m/s"
+            info["Camera"] = camera_mgr.get_current_camera_name()
 
-            # Render
-            draw = observations_to_image(obs, info)
-            if not args.skip_render_text:
-                draw = overlay_frame(draw, info)
+            # ================================================================
+            # RENDER FROM ACTIVE CAMERA
+            # ================================================================
+            if camera_mgr.current_camera_idx == 0:
+                # Use follow camera (third_rgb from observations)
+                draw = observations_to_image(obs, info)
+                if not args.skip_render_text:
+                    draw = overlay_frame(draw, info)
+            else:
+                # Render from fixed camera
+                camera_view = camera_mgr.render_from_camera(
+                    camera_mgr.current_camera_idx,
+                    resolution=(args.play_cam_res, args.play_cam_res)
+                )
+
+                if camera_view is not None:
+                    # Create a display with the camera view
+                    draw = camera_view
+                    if not args.skip_render_text:
+                        # Add info overlay
+                        draw = np.copy(draw)
+                        y_offset = 20
+                        for key, value in info.items():
+                            text = f"{key}: {value}"
+                            cv2.putText(draw, text, (10, y_offset),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                            y_offset += 20
+                else:
+                    # Fallback to observations
+                    draw = observations_to_image(obs, info)
+                    if not args.skip_render_text:
+                        draw = overlay_frame(draw, info)
 
             renderer.show(draw)
 
