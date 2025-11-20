@@ -89,7 +89,7 @@ class FreeCamHelper:
     def update_camera(self, key: Optional[str], sim):
         """Update free camera position and rotation."""
         if not self._is_free_cam_mode:
-            return False
+            return None
 
         # Rotation controls (using arrow keys-like pattern)
         offset_rpy = np.zeros(3)
@@ -131,16 +131,17 @@ class FreeCamHelper:
         self._free_rpy += offset_rpy
         self._free_xyz += offset_xyz
 
-        # Create transformation matrix from Euler angles and position
+        # Create quaternion from Euler angles
         quat = euler_to_quat(self._free_rpy)
-        trans = mn.Matrix4.from_(
-            quat.to_matrix(), mn.Vector3(*self._free_xyz)
+
+        # Use the CORRECT Habitat API to get observations from arbitrary position/rotation
+        obs = sim.get_observations_at(
+            position=mn.Vector3(*self._free_xyz),
+            rotation=quat,
+            keep_agent_at_new_pose=False  # Don't move the agent
         )
 
-        # THE KEY: Directly manipulate the sensor node (bypasses all physics)
-        sim._sensors["third_rgb"]._sensor_object.node.transformation = trans
-
-        return True  # Camera was updated
+        return obs  # Return observation from free camera position
 
 
 # ============================================================================
@@ -219,35 +220,36 @@ class CameraManager:
             return "Follow Cam"
         return self.camera_configs[self.current_camera_idx]['name']
 
-    def apply_camera_transform(self, camera_idx: int, humanoid_pos: mn.Vector3):
+    def get_camera_observation(self, camera_idx: int, humanoid_pos: mn.Vector3):
         """
-        Apply camera transform by manipulating agent's scene node directly.
-        This is simpler than changing agent state.
+        Get observation from a specific camera using get_observations_at().
+        This is the CORRECT way from Habitat documentation.
         """
         if camera_idx == 0:
-            # Follow camera - position behind humanoid
-            # This is handled automatically by third_rgb sensor
-            return
+            # Follow camera - return None to use default observation
+            return None
 
         # Get the camera configuration
         cam = self.camera_configs[camera_idx]
 
-        # Get agent scene node (this is the physical representation)
-        agent = self.sim.get_agent(0)
-
-        # Calculate look-at transformation
+        # Calculate look-at orientation
         look_at_matrix = mn.Matrix4.look_at(
             cam['position'],      # camera position
             cam['look_at'],       # look at target (scene center)
             mn.Vector3(0, 1, 0)   # up vector
         )
 
-        # Invert because look_at creates a view matrix, we need model matrix
-        camera_transform = look_at_matrix.inverted()
+        # Extract rotation as quaternion
+        rotation_quat = mn.Quaternion.from_matrix(look_at_matrix.rotation())
 
-        # Apply transform to agent's scene node
-        # This moves where the camera sees from without affecting physics
-        agent.scene_node.transformation = camera_transform
+        # Use the CORRECT Habitat API to get observations from arbitrary position/rotation
+        obs = self.sim.get_observations_at(
+            position=cam['position'],
+            rotation=rotation_quat,
+            keep_agent_at_new_pose=False  # Don't actually move the agent
+        )
+
+        return obs
 
 
 # ============================================================================
@@ -672,12 +674,11 @@ def main():
             # CHECK IF IN FREE CAMERA MODE
             # ================================================================
             if free_cam.is_free_cam_mode:
-                # FREE CAMERA MODE - update camera but skip humanoid control/physics
-                free_cam.update_camera(key, sim)
-
-                # Get observations directly from sim (don't step env - it would reset camera!)
-                # This is the key difference from normal mode
-                obs = sim.get_sensor_observations()
+                # FREE CAMERA MODE - use get_observations_at() API
+                free_cam_obs = free_cam.update_camera(key, sim)
+                if free_cam_obs is not None:
+                    obs = free_cam_obs
+                # Skip humanoid control and physics in free camera mode
 
             else:
                 # NORMAL MODE - control humanoid
@@ -719,18 +720,21 @@ def main():
                 humanoid_controller.apply_movement(forward_speed, rot_speed, kin_humanoid)
 
                 # ================================================================
-                # STEP 3: Apply camera transform
-                # ================================================================
-                # Position camera before rendering
-                camera_mgr.apply_camera_transform(
-                    camera_mgr.current_camera_idx,
-                    kin_humanoid.base_pos
-                )
-
-                # ================================================================
-                # STEP 4: Step physics
+                # STEP 3: Step physics
                 # ================================================================
                 sim.step_physics(1.0 / 60.0)
+
+                # ================================================================
+                # STEP 4: Get camera observation if needed
+                # ================================================================
+                if camera_mgr.current_camera_idx != 0:
+                    # Get observation from fixed camera using get_observations_at()
+                    camera_obs = camera_mgr.get_camera_observation(
+                        camera_mgr.current_camera_idx,
+                        kin_humanoid.base_pos
+                    )
+                    if camera_obs is not None:
+                        obs = camera_obs
 
             # Get metrics
             info = env.get_metrics()
