@@ -29,6 +29,7 @@ from habitat.tasks.rearrange.utils import euler_to_quat
 from habitat.utils.visualizations.utils import observations_to_image, overlay_frame
 import habitat.articulated_agents.humanoids.kinematic_humanoid as kinematic_humanoid
 import habitat_sim
+from habitat_sim.utils.common import quat_to_coeffs
 
 
 # ============================================================================
@@ -164,7 +165,8 @@ class CameraManager:
         # Create new state with camera position and orientation
         new_state = habitat_sim.AgentState()
         new_state.position = cam['position']
-        new_state.rotation = rotation_quat
+        # Convert Magnum quaternion to [x, y, z, w] list format for habitat_sim
+        new_state.rotation = quat_to_coeffs(rotation_quat)
         new_state.sensor_states = {}  # Empty to let sensors follow agent
 
         # Set agent to camera position
