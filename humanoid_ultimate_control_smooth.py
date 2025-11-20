@@ -186,18 +186,45 @@ class CameraManager:
             bounds_max = mn.Vector3(10, 5, 10)
 
         center = (bounds_min + bounds_max) * 0.5
-        height = bounds_max.y * 0.8  # 80% of max height
+        height = center.y + 2.0  # 2 meters above center height for good view
 
-        # Calculate corner positions (elevated for better view)
+        # Calculate scene size
+        scene_size = bounds_max - bounds_min
+
+        # Position cameras 60% from center towards edges (not at extreme bounds)
+        # This keeps them inside the scene with good viewing angles
+        offset_factor = 0.6
+
         corners = [
-            (mn.Vector3(bounds_min.x, height, bounds_min.z), "Corner 1 (SW)"),
-            (mn.Vector3(bounds_max.x, height, bounds_min.z), "Corner 2 (SE)"),
-            (mn.Vector3(bounds_max.x, height, bounds_max.z), "Corner 3 (NE)"),
-            (mn.Vector3(bounds_min.x, height, bounds_max.z), "Corner 4 (NW)"),
+            # Southwest
+            (mn.Vector3(
+                center.x + (bounds_min.x - center.x) * offset_factor,
+                height,
+                center.z + (bounds_min.z - center.z) * offset_factor
+            ), "Corner 1 (SW)"),
+            # Southeast
+            (mn.Vector3(
+                center.x + (bounds_max.x - center.x) * offset_factor,
+                height,
+                center.z + (bounds_min.z - center.z) * offset_factor
+            ), "Corner 2 (SE)"),
+            # Northeast
+            (mn.Vector3(
+                center.x + (bounds_max.x - center.x) * offset_factor,
+                height,
+                center.z + (bounds_max.z - center.z) * offset_factor
+            ), "Corner 3 (NE)"),
+            # Northwest
+            (mn.Vector3(
+                center.x + (bounds_min.x - center.x) * offset_factor,
+                height,
+                center.z + (bounds_max.z - center.z) * offset_factor
+            ), "Corner 4 (NW)"),
         ]
 
-        # Add overhead camera
-        overhead_pos = mn.Vector3(center.x, bounds_max.y * 1.5, center.z)
+        # Add overhead camera - not too high, just above the scene
+        overhead_height = center.y + max(scene_size.x, scene_size.z) * 0.5
+        overhead_pos = mn.Vector3(center.x, overhead_height, center.z)
         self.add_camera("Overhead", overhead_pos, center)
 
         # Add corner cameras looking at center
