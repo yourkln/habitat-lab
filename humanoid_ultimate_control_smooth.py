@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import pickle as pkl
+import json
 from typing import Optional, Dict, Any, List
 
 import cv2
@@ -37,6 +38,7 @@ import habitat_sim
 
 DEFAULT_CFG = "benchmark/rearrange/play/play.yaml"
 WINDOW_NAME = "Humanoid Manual Control - SMOOTH + Multi-Cam"
+CAMERA_CONFIG_FILE = "camera_config.json"
 
 HUMANOID_NAME = "female_2"
 HUMANOID_URDF = f"data/humanoids/humanoid_data/{HUMANOID_NAME}/{HUMANOID_NAME}.urdf"
@@ -154,11 +156,20 @@ class FreeCamHelper:
 class CameraManager:
     """Manages multiple camera viewpoints and switching between them."""
 
-    def __init__(self, sim):
+    def __init__(self, sim, config_file: str = CAMERA_CONFIG_FILE):
         self.sim = sim
         self.camera_configs = []
         self.current_camera_idx = 0
         self.camera_names = []
+        self.config_file = config_file
+
+        # Dynamic camera parameters
+        self.offset_factor = 0.1  # Default: 10% from center to edge
+        self.camera_height_offset = 2.0  # Default: 2m above center
+        self.scene_bounds = None
+
+        # Load saved config if exists
+        self.load_config()
 
     def add_camera(self, name: str, position: mn.Vector3, look_at: mn.Vector3):
         """Add a camera with position and look-at target."""
@@ -170,55 +181,56 @@ class CameraManager:
         })
 
     def setup_corner_cameras(self, scene_bounds: tuple = None):
-        """Setup cameras at scene corners."""
+        """Setup cameras at scene corners using current offset_factor."""
+        # Save scene bounds for re-setup
+        if scene_bounds is not None:
+            self.scene_bounds = scene_bounds
+
         # Handle different bounds formats
-        if scene_bounds is None:
+        if self.scene_bounds is None:
             # Default scene bounds
             bounds_min = mn.Vector3(-10, 0, -10)
             bounds_max = mn.Vector3(10, 5, 10)
-        elif isinstance(scene_bounds, tuple) and len(scene_bounds) == 2:
+        elif isinstance(self.scene_bounds, tuple) and len(self.scene_bounds) == 2:
             # Pathfinder returns (min_vec, max_vec) tuple
-            bounds_min = scene_bounds[0]
-            bounds_max = scene_bounds[1]
+            bounds_min = self.scene_bounds[0]
+            bounds_max = self.scene_bounds[1]
         else:
             # Fallback
             bounds_min = mn.Vector3(-10, 0, -10)
             bounds_max = mn.Vector3(10, 5, 10)
 
         center = (bounds_min + bounds_max) * 0.5
-        height = center.y + 2.0  # 2 meters above center height for good view
+        height = center.y + self.camera_height_offset
 
         # Calculate scene size
         scene_size = bounds_max - bounds_min
 
-        # Position cameras closer to center for better viewing angles
-        # 0.36 = 40% closer than previous 0.6 position
-        offset_factor = 0.36
-
+        # Use the dynamic offset_factor
         corners = [
             # Southwest
             (mn.Vector3(
-                center.x + (bounds_min.x - center.x) * offset_factor,
+                center.x + (bounds_min.x - center.x) * self.offset_factor,
                 height,
-                center.z + (bounds_min.z - center.z) * offset_factor
+                center.z + (bounds_min.z - center.z) * self.offset_factor
             ), "Corner 1 (SW)"),
             # Southeast
             (mn.Vector3(
-                center.x + (bounds_max.x - center.x) * offset_factor,
+                center.x + (bounds_max.x - center.x) * self.offset_factor,
                 height,
-                center.z + (bounds_min.z - center.z) * offset_factor
+                center.z + (bounds_min.z - center.z) * self.offset_factor
             ), "Corner 2 (SE)"),
             # Northeast
             (mn.Vector3(
-                center.x + (bounds_max.x - center.x) * offset_factor,
+                center.x + (bounds_max.x - center.x) * self.offset_factor,
                 height,
-                center.z + (bounds_max.z - center.z) * offset_factor
+                center.z + (bounds_max.z - center.z) * self.offset_factor
             ), "Corner 3 (NE)"),
             # Northwest
             (mn.Vector3(
-                center.x + (bounds_min.x - center.x) * offset_factor,
+                center.x + (bounds_min.x - center.x) * self.offset_factor,
                 height,
-                center.z + (bounds_max.z - center.z) * offset_factor
+                center.z + (bounds_max.z - center.z) * self.offset_factor
             ), "Corner 4 (NW)"),
         ]
 
@@ -231,7 +243,7 @@ class CameraManager:
         for pos, name in corners:
             self.add_camera(name, pos, center)
 
-        print(f"✓ Setup {len(self.camera_configs)} fixed cameras")
+        print(f"✓ Setup {len(self.camera_configs)} fixed cameras (offset={self.offset_factor:.2f})")
 
     def add_follow_camera(self, humanoid_pos: mn.Vector3):
         """Add a third-person follow camera (updated each frame)."""
@@ -283,6 +295,74 @@ class CameraManager:
         )
 
         return obs
+
+    def adjust_offset(self, delta: float):
+        """Adjust camera offset factor by delta amount."""
+        old_offset = self.offset_factor
+        self.offset_factor = max(0.01, min(1.0, self.offset_factor + delta))
+
+        if abs(self.offset_factor - old_offset) > 0.001:
+            print(f"📐 Camera offset: {self.offset_factor:.2f} (changed by {delta:+.2f})")
+            # Re-setup cameras with new offset
+            self.refresh_cameras()
+
+    def adjust_height(self, delta: float):
+        """Adjust camera height offset by delta amount."""
+        old_height = self.camera_height_offset
+        self.camera_height_offset = max(0.5, self.camera_height_offset + delta)
+
+        if abs(self.camera_height_offset - old_height) > 0.001:
+            print(f"📏 Camera height offset: {self.camera_height_offset:.2f}m (changed by {delta:+.2f}m)")
+            # Re-setup cameras with new height
+            self.refresh_cameras()
+
+    def refresh_cameras(self):
+        """Re-setup all cameras with current parameters."""
+        # Clear existing cameras
+        self.camera_configs = []
+        self.camera_names = []
+        self.current_camera_idx = 0
+
+        # Re-setup with current parameters
+        self.setup_corner_cameras()
+
+    def save_config(self):
+        """Save current camera configuration to JSON file."""
+        config = {
+            'offset_factor': self.offset_factor,
+            'camera_height_offset': self.camera_height_offset
+        }
+
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            print(f"💾 Camera config saved to {self.config_file}")
+            print(f"   - offset_factor: {self.offset_factor:.2f}")
+            print(f"   - height_offset: {self.camera_height_offset:.2f}m")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save config: {e}")
+            return False
+
+    def load_config(self):
+        """Load camera configuration from JSON file."""
+        if not os.path.exists(self.config_file):
+            return False
+
+        try:
+            with open(self.config_file, 'r') as f:
+                config = json.load(f)
+
+            self.offset_factor = config.get('offset_factor', 0.1)
+            self.camera_height_offset = config.get('camera_height_offset', 2.0)
+
+            print(f"📂 Camera config loaded from {self.config_file}")
+            print(f"   - offset_factor: {self.offset_factor:.2f}")
+            print(f"   - height_offset: {self.camera_height_offset:.2f}m")
+            return True
+        except Exception as e:
+            print(f"⚠️  Failed to load config: {e}")
+            return False
 
 
 # ============================================================================
@@ -481,6 +561,16 @@ def parse_args():
     parser.add_argument("--render-width", type=int, default=1280)
     parser.add_argument("--render-height", type=int, default=720)
     parser.add_argument("--skip-render-text", action="store_true", default=False)
+
+    # Camera configuration arguments
+    parser.add_argument("--cam-offset", type=float, default=None,
+                        help="Camera offset factor (0.0-1.0, default: 0.1). "
+                             "0.0=at center, 1.0=at scene edge")
+    parser.add_argument("--cam-height", type=float, default=None,
+                        help="Camera height offset in meters above scene center (default: 2.0)")
+    parser.add_argument("--cam-config", type=str, default=CAMERA_CONFIG_FILE,
+                        help=f"Camera config file path (default: {CAMERA_CONFIG_FILE})")
+
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -596,6 +686,8 @@ def main():
     print("="*80)
     print(f"\n  Motion Speed: {LINEAR_SPEED} m/s linear, {ANGULAR_SPEED} rad/s angular")
     print(f"  Physics Rate: {CTRL_FREQ} Hz")
+    print(f"\n  💡 TIP: Use --cam-offset 0.1 --cam-height 2.0 to set camera positions from CLI")
+    print(f"      Config file: {args.cam_config}")
     print("\n  === HUMANOID CONTROL ===")
     print("  I/K : Walk forward/backward")
     print("  J/L : Strafe left/right")
@@ -604,13 +696,18 @@ def main():
     print("  SPACE : Pick nearest")
     print("  T     : Throw")
     print("  G     : Release")
-    print("\n  === FREE CAMERA MODE ===")
+    print("\n  === CAMERA SYSTEM ===")
+    print("  C     : Switch camera view (overhead, corners)")
     print("  Z     : Toggle FREE CAMERA (fly anywhere!)")
     print("    W/S : Forward/Backward (in free cam)")
     print("    A/D : Left/Right (in free cam)")
     print("    Q/E : Up/Down (in free cam)")
     print("    I/K/J/L/U/O : Rotate camera (in free cam)")
     print("    B   : Reset camera position")
+    print("\n  === CAMERA ADJUSTMENT ===")
+    print("  +/-   : Adjust camera offset (distance from center)")
+    print("  [ ]   : Adjust camera height")
+    print("  V     : Save camera config to file")
     print("\n  N : NavMesh | P : Position | M : Reset | ESC : Quit")
     print("\n" + "="*80 + "\n")
 
@@ -632,7 +729,15 @@ def main():
             logger.info("✅ NavMesh loaded")
 
         # ===== SETUP CAMERAS =====
-        camera_mgr = CameraManager(sim)
+        camera_mgr = CameraManager(sim, config_file=args.cam_config)
+
+        # Apply command-line overrides if provided
+        if args.cam_offset is not None:
+            camera_mgr.offset_factor = args.cam_offset
+            print(f"🎯 Using command-line camera offset: {camera_mgr.offset_factor:.2f}")
+        if args.cam_height is not None:
+            camera_mgr.camera_height_offset = args.cam_height
+            print(f"🎯 Using command-line camera height: {camera_mgr.camera_height_offset:.2f}m")
 
         # Get scene bounds from pathfinder if available
         if sim.pathfinder.is_loaded:
@@ -693,6 +798,22 @@ def main():
             # Camera switching (only in follow mode)
             if key == "c" and not free_cam.is_free_cam_mode:
                 camera_mgr.cycle_camera()
+
+            # Camera offset adjustment (works in all modes)
+            if key == "=" or key == "+":  # Increase offset (move cameras away from center)
+                camera_mgr.adjust_offset(0.05)
+            elif key == "-" or key == "_":  # Decrease offset (move cameras toward center)
+                camera_mgr.adjust_offset(-0.05)
+
+            # Camera height adjustment
+            if key == "[":  # Lower cameras
+                camera_mgr.adjust_height(-0.5)
+            elif key == "]":  # Raise cameras
+                camera_mgr.adjust_height(0.5)
+
+            # Save camera configuration
+            if key == "v":  # 'V' for save (S is taken for movement)
+                camera_mgr.save_config()
 
             # ================================================================
             # STEP 1: Step environment (always do this for proper observations)
