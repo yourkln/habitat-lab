@@ -79,26 +79,33 @@ class CameraManager:
 
     def setup_corner_cameras(self, scene_bounds: tuple = None):
         """Setup cameras at scene corners."""
-        # If we have scene bounds, use them, otherwise use defaults
+        # Handle different bounds formats
         if scene_bounds is None:
-            # Default scene bounds (will be overridden if pathfinder available)
-            bounds = mn.Range3D(mn.Vector3(-10, 0, -10), mn.Vector3(10, 5, 10))
+            # Default scene bounds
+            bounds_min = mn.Vector3(-10, 0, -10)
+            bounds_max = mn.Vector3(10, 5, 10)
+        elif isinstance(scene_bounds, tuple) and len(scene_bounds) == 2:
+            # Pathfinder returns (min_vec, max_vec) tuple
+            bounds_min = scene_bounds[0]
+            bounds_max = scene_bounds[1]
         else:
-            bounds = scene_bounds
+            # Fallback
+            bounds_min = mn.Vector3(-10, 0, -10)
+            bounds_max = mn.Vector3(10, 5, 10)
 
-        center = (bounds.min + bounds.max) * 0.5
-        height = bounds.max.y * 0.8  # 80% of max height
+        center = (bounds_min + bounds_max) * 0.5
+        height = bounds_max.y * 0.8  # 80% of max height
 
         # Calculate corner positions (elevated for better view)
         corners = [
-            (mn.Vector3(bounds.min.x, height, bounds.min.z), "Corner 1 (SW)"),
-            (mn.Vector3(bounds.max.x, height, bounds.min.z), "Corner 2 (SE)"),
-            (mn.Vector3(bounds.max.x, height, bounds.max.z), "Corner 3 (NE)"),
-            (mn.Vector3(bounds.min.x, height, bounds.max.z), "Corner 4 (NW)"),
+            (mn.Vector3(bounds_min.x, height, bounds_min.z), "Corner 1 (SW)"),
+            (mn.Vector3(bounds_max.x, height, bounds_min.z), "Corner 2 (SE)"),
+            (mn.Vector3(bounds_max.x, height, bounds_max.z), "Corner 3 (NE)"),
+            (mn.Vector3(bounds_min.x, height, bounds_max.z), "Corner 4 (NW)"),
         ]
 
         # Add overhead camera
-        overhead_pos = mn.Vector3(center.x, bounds.max.y * 1.5, center.z)
+        overhead_pos = mn.Vector3(center.x, bounds_max.y * 1.5, center.z)
         self.add_camera("Overhead", overhead_pos, center)
 
         # Add corner cameras looking at center
